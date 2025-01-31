@@ -31,7 +31,7 @@ This Bash script automates the process of cloning and configuring multiple VMs o
 ## Usage
 
 ```sh
-./proxmox-create-vms.sh -n <num_vms> -p <prefix> [options]
+./vm-batch-creator-proxmox.sh -n <num_vms> -p <prefix> [options]
 ```
 
 ### Required Flags
@@ -57,7 +57,7 @@ This Bash script automates the process of cloning and configuring multiple VMs o
 ### Example 1: Minimal (with Defaults)
 
 ```sh
-./proxmox-create-vms.sh -n 3 -p ansible
+./vm-batch-creator-proxmox.sh -n 3 -p ansible
 ```
 
 Creates **3 VMs**: `ansible-1`, `ansible-2`, `ansible-3`.
@@ -68,7 +68,7 @@ Creates **3 VMs**: `ansible-1`, `ansible-2`, `ansible-3`.
 ### Example 2: Static IPs and Custom Resources
 
 ```sh
-./proxmox-create-vms.sh -n 2 -p test -c 4 -m 8G -b vmbr0 -i 192.168.1.100/24
+./vm-batch-creator-proxmox.sh -n 2 -p test -c 4 -m 8G -b vmbr0 -i 192.168.1.100/24
 ```
 
 Creates **2 VMs**: `test-1`, `test-2`.
@@ -80,7 +80,7 @@ Creates **2 VMs**: `test-1`, `test-2`.
 ### Example 3: Snapshot Before Cloning
 
 ```sh
-./proxmox-create-vms.sh -n 5 -p node -s
+./vm-batch-creator-proxmox.sh -n 5 -p node -s
 ```
 
 Creates **5 VMs** (`node-1` to `node-5`) **after creating a snapshot of the template**.
