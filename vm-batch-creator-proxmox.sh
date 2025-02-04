@@ -2,8 +2,8 @@
 
 # ------------------------------------------------------------------------------
 # Proxmox Batch VM Creation Script with Disk Resize Feature
-#   With interactive prompts for default hardware overrides and an option to
-#   add extra disk space to the created VMs.
+#   With interactive prompts for default hardware overrides, optional extra disk space,
+#   and configurable disk device for resizing.
 # ------------------------------------------------------------------------------
 
 set -euo pipefail  # Exit on error, unset variables are errors, pipeline fails on first error
@@ -16,6 +16,7 @@ START_ID=5050
 DEFAULT_CPU_CORES=2
 DEFAULT_RAM="4096M"       # 4096 MB by default
 DEFAULT_NET_BRIDGE="vmbr1"
+DEFAULT_DISK_DEVICE="scsi0"  # Default disk device to resize
 
 # Upper/Lower bounds (adjust to taste)
 MAX_CPU_CORES=32
@@ -28,15 +29,17 @@ VM_PREFIX=""
 CPU_CORES="$DEFAULT_CPU_CORES"
 RAM="$DEFAULT_RAM"
 NET_BRIDGE="$DEFAULT_NET_BRIDGE"
+DISK_DEVICE="$DEFAULT_DISK_DEVICE"
 USE_STATIC_IP=false
 FIRST_IP=""   # e.g. "192.168.1.10/24"
 ENABLE_SNAPSHOT=false
-EXTRA_DISK=""  # New: Extra disk space to add (e.g., 10G or 512M)
+EXTRA_DISK=""  # Extra disk space to add (e.g., 10G or 512M)
 
 # Bookkeeping to detect if user explicitly set each option
 FLAG_CPU_SET=false
 FLAG_RAM_SET=false
 FLAG_BRIDGE_SET=false
+FLAG_DISK_DEVICE_SET=false
 
 # ----- Usage Function -----
 usage() {
@@ -44,7 +47,7 @@ usage() {
 Usage: $0 -n <num_vms> -p <prefix> [options]
 
 Required:
-  -n NUM       Number of VMs to create
+  -n NUM       Number of VMs to create.
   -p PREFIX    VM name prefix (e.g., 'ansible' -> ansible-1, ansible-2)
 
 Options:
@@ -53,16 +56,16 @@ Options:
                - plain MB (e.g., 4096) [default: $DEFAULT_RAM]
                - suffix M or G (e.g., 512M, 2G)
   -b BRIDGE    Network bridge (default: $DEFAULT_NET_BRIDGE)
-  -i IP/CIDR   First static IP with optional CIDR (e.g. 192.168.10.50/24).
+  -i IP/CIDR   First static IP with optional CIDR (e.g., 192.168.10.50/24).
                Each subsequent VM increments the last octet.
-  -d DISK      Extra disk space to add to the VM (e.g., 10G, 512M). 
-               This will run "qm resize" on the primary disk (assumed as scsi0).
-  -s           Take a snapshot of the template before cloning
-  -h           Show this help message
+  -d DISK      Extra disk space to add to the VM (e.g., 10G, 512M).
+  -D DEVICE    Disk device to resize (default: $DEFAULT_DISK_DEVICE).
+  -s           Create a snapshot of the template before cloning.
+  -h           Show this help message.
 
 Examples:
   $0 -n 3 -p ansible
-  $0 -n 3 -p ansible -c 2 -m 2G -b vmbr1 -i 192.168.10.50/24 -d 10G
+  $0 -n 3 -p ansible -c 2 -m 2G -b vmbr1 -i 192.168.10.50/24 -d 10G -D scsi0
 EOF
   exit 1
 }
@@ -138,7 +141,7 @@ check_ip_range() {
 }
 
 # ----- Parse CLI Arguments -----
-while getopts "n:p:c:m:b:i:d:sh" opt; do
+while getopts "n:p:c:m:b:i:d:D:sh" opt; do
   case "$opt" in
     n) NUM_VMS="$OPTARG" ;;
     p) VM_PREFIX="$OPTARG" ;;
@@ -147,6 +150,7 @@ while getopts "n:p:c:m:b:i:d:sh" opt; do
     b) NET_BRIDGE="$OPTARG"; FLAG_BRIDGE_SET=true ;;
     i) USE_STATIC_IP=true; FIRST_IP="$OPTARG" ;;
     d) EXTRA_DISK="$OPTARG" ;;
+    D) DISK_DEVICE="$OPTARG"; FLAG_DISK_DEVICE_SET=true ;;
     s) ENABLE_SNAPSHOT=true ;;
     h) usage ;;
     *) usage ;;
@@ -191,7 +195,7 @@ fi
 
 # 2) RAM
 if [[ "$FLAG_RAM_SET" == "false" ]]; then
-  echo "Default RAM is $DEFAULT_RAM (e.g., $((4096)) MB)."
+  echo "Default RAM is $DEFAULT_RAM (e.g., 4096 MB)."
   read -rp "Would you like to override the default RAM? (y/N): " ans
   ans="${ans,,}"
   if [[ "$ans" == "y" ]]; then
@@ -210,6 +214,18 @@ if [[ "$FLAG_BRIDGE_SET" == "false" ]]; then
     read -rp "Enter new bridge name (e.g., vmbr0): " user_bridge
     NET_BRIDGE="$user_bridge"
     FLAG_BRIDGE_SET=true
+  fi
+fi
+
+# 4) Disk Device
+if [[ "$FLAG_DISK_DEVICE_SET" == "false" ]]; then
+  echo "Default disk device is '$DEFAULT_DISK_DEVICE'."
+  read -rp "Would you like to override the default disk device? (y/N): " ans
+  ans="${ans,,}"
+  if [[ "$ans" == "y" ]]; then
+    read -rp "Enter new disk device (e.g., scsi0, virtio0): " user_drive
+    DISK_DEVICE="$user_drive"
+    FLAG_DISK_DEVICE_SET=true
   fi
 fi
 
@@ -284,10 +300,12 @@ fi
 cpu_origin="(default)"
 ram_origin="(default)"
 bridge_origin="(default)"
+disk_origin="(default)"
 
 $FLAG_CPU_SET && cpu_origin="(user-specified)"
 $FLAG_RAM_SET && ram_origin="(user-specified)"
 $FLAG_BRIDGE_SET && bridge_origin="(user-specified)"
+$FLAG_DISK_DEVICE_SET && disk_origin="(user-specified)"
 
 # ----- Final Summary Before Proceeding -----
 echo ""
@@ -302,7 +320,7 @@ echo "  CPU cores:   $CPU_CORES $cpu_origin"
 echo "  RAM:         ${RAM_MB}MB $ram_origin"
 echo "  Bridge:      $NET_BRIDGE $bridge_origin"
 if [[ -n "$EXTRA_DISK" ]]; then
-  echo "  Extra disk:  $EXTRA_DISK (to be added to scsi0)"
+  echo "  Extra disk:  $EXTRA_DISK on device $DISK_DEVICE"
 else
   echo "  Extra disk:  None"
 fi
@@ -361,7 +379,7 @@ for (( i=1; i<=NUM_VMS; i++ )); do
     qm set "$VM_ID" --ipconfig0 "ip=dhcp" &>/dev/null
   fi
 
-  # ----- New: Resize Disk if EXTRA_DISK is Specified -----
+  # Resize Disk if EXTRA_DISK is Specified
   if [[ -n "$EXTRA_DISK" ]]; then
     # Ensure the size argument starts with a plus sign (e.g., "+10G")
     if [[ "$EXTRA_DISK" =~ ^\+ ]]; then
@@ -370,8 +388,7 @@ for (( i=1; i<=NUM_VMS; i++ )); do
       SIZE_ARG="+$EXTRA_DISK"
     fi
     echo -ne "Resizing disk for VM $VM_ID ($VM_NAME)... "
-    # Assumes the disk device is scsi0; adjust if necessary.
-    if qm resize "$VM_ID" scsi0 "$SIZE_ARG" &>/dev/null; then
+    if qm resize "$VM_ID" "$DISK_DEVICE" "$SIZE_ARG" &>/dev/null; then
       echo "Done"
     else
       echo "Failed"
