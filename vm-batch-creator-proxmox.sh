@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 
 # ------------------------------------------------------------------------------
-# Proxmox Batch VM Creation Script
-#   With interactive prompts for default hardware overrides
+# Proxmox Batch VM Creation Script with Disk Resize Feature
+#   With interactive prompts for default hardware overrides and an option to
+#   add extra disk space to the created VMs.
 # ------------------------------------------------------------------------------
 
 set -euo pipefail  # Exit on error, unset variables are errors, pipeline fails on first error
@@ -30,6 +31,7 @@ NET_BRIDGE="$DEFAULT_NET_BRIDGE"
 USE_STATIC_IP=false
 FIRST_IP=""   # e.g. "192.168.1.10/24"
 ENABLE_SNAPSHOT=false
+EXTRA_DISK=""  # New: Extra disk space to add (e.g., 10G or 512M)
 
 # Bookkeeping to detect if user explicitly set each option
 FLAG_CPU_SET=false
@@ -53,12 +55,14 @@ Options:
   -b BRIDGE    Network bridge (default: $DEFAULT_NET_BRIDGE)
   -i IP/CIDR   First static IP with optional CIDR (e.g. 192.168.10.50/24).
                Each subsequent VM increments the last octet.
+  -d DISK      Extra disk space to add to the VM (e.g., 10G, 512M). 
+               This will run "qm resize" on the primary disk (assumed as scsi0).
   -s           Take a snapshot of the template before cloning
   -h           Show this help message
 
 Examples:
   $0 -n 3 -p ansible
-  $0 -n 3 -p ansible -c 2 -m 2G -b vmbr1 -i 192.168.10.50/24
+  $0 -n 3 -p ansible -c 2 -m 2G -b vmbr1 -i 192.168.10.50/24 -d 10G
 EOF
   exit 1
 }
@@ -134,7 +138,7 @@ check_ip_range() {
 }
 
 # ----- Parse CLI Arguments -----
-while getopts "n:p:c:m:b:i:sh" opt; do
+while getopts "n:p:c:m:b:i:d:sh" opt; do
   case "$opt" in
     n) NUM_VMS="$OPTARG" ;;
     p) VM_PREFIX="$OPTARG" ;;
@@ -142,6 +146,7 @@ while getopts "n:p:c:m:b:i:sh" opt; do
     m) RAM="$OPTARG"; FLAG_RAM_SET=true ;;
     b) NET_BRIDGE="$OPTARG"; FLAG_BRIDGE_SET=true ;;
     i) USE_STATIC_IP=true; FIRST_IP="$OPTARG" ;;
+    d) EXTRA_DISK="$OPTARG" ;;
     s) ENABLE_SNAPSHOT=true ;;
     h) usage ;;
     *) usage ;;
@@ -157,6 +162,14 @@ fi
 if ! [[ "$NUM_VMS" =~ ^[0-9]+$ ]] || (( NUM_VMS < 1 )); then
   echo "Error: -n must be a positive integer." >&2
   exit 1
+fi
+
+# ----- Validate EXTRA_DISK if Specified -----
+if [[ -n "$EXTRA_DISK" ]]; then
+  if ! [[ "$EXTRA_DISK" =~ ^[0-9]+[mMgG]$ ]]; then
+    echo "Error: invalid extra disk space format '$EXTRA_DISK'. Expected format examples: 10G, 512M." >&2
+    exit 1
+  fi
 fi
 
 # ----- Possibly Ask for Override if Not Set by Flags -----
@@ -183,7 +196,6 @@ if [[ "$FLAG_RAM_SET" == "false" ]]; then
   ans="${ans,,}"
   if [[ "$ans" == "y" ]]; then
     read -rp "Enter new RAM (e.g., 2048, 512M, 2G): " user_ram
-    # We'll parse it into MB, check validity
     RAM="$user_ram"
     FLAG_RAM_SET=true
   fi
@@ -289,6 +301,11 @@ echo "Hardware specs for each VM:"
 echo "  CPU cores:   $CPU_CORES $cpu_origin"
 echo "  RAM:         ${RAM_MB}MB $ram_origin"
 echo "  Bridge:      $NET_BRIDGE $bridge_origin"
+if [[ -n "$EXTRA_DISK" ]]; then
+  echo "  Extra disk:  $EXTRA_DISK (to be added to scsi0)"
+else
+  echo "  Extra disk:  None"
+fi
 echo ""
 if [[ "$USE_STATIC_IP" == "true" ]]; then
   echo "Using static IP. First IP: $IP_BASE.$LAST_OCTET/$CIDR"
@@ -334,7 +351,7 @@ for (( i=1; i<=NUM_VMS; i++ )); do
   qm set "$VM_ID" --memory "$RAM_MB" --cores "$CPU_CORES" &>/dev/null
   qm set "$VM_ID" --net0 "virtio,bridge=$NET_BRIDGE" &>/dev/null
 
-  # IP
+  # IP Configuration
   if [[ "$USE_STATIC_IP" == "true" ]]; then
     vm_ip="${IP_BASE}.$((LAST_OCTET + i - 1))"
     # Assume gateway is .1
@@ -344,7 +361,25 @@ for (( i=1; i<=NUM_VMS; i++ )); do
     qm set "$VM_ID" --ipconfig0 "ip=dhcp" &>/dev/null
   fi
 
-  # Start
+  # ----- New: Resize Disk if EXTRA_DISK is Specified -----
+  if [[ -n "$EXTRA_DISK" ]]; then
+    # Ensure the size argument starts with a plus sign (e.g., "+10G")
+    if [[ "$EXTRA_DISK" =~ ^\+ ]]; then
+      SIZE_ARG="$EXTRA_DISK"
+    else
+      SIZE_ARG="+$EXTRA_DISK"
+    fi
+    echo -ne "Resizing disk for VM $VM_ID ($VM_NAME)... "
+    # Assumes the disk device is scsi0; adjust if necessary.
+    if qm resize "$VM_ID" scsi0 "$SIZE_ARG" &>/dev/null; then
+      echo "Done"
+    else
+      echo "Failed"
+      exit 1
+    fi
+  fi
+
+  # Start the VM
   qm start "$VM_ID" &>/dev/null
   echo "VM $VM_ID ($VM_NAME) created and started."
 done
